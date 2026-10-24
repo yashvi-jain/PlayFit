@@ -56,7 +56,7 @@ class ReplayBuffer:
 class DQNAgent:
     """Double + Dueling DQN with soft (Polyak) target updates."""
 
-    def __init__(self, state_dim=9, action_dim=5, seed=42, lr=5e-4):
+    def __init__(self, state_dim=12, action_dim=36, seed=42, lr=5e-4):
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
@@ -72,7 +72,7 @@ class DQNAgent:
         self.batch_size = 128
         self.epsilon = 1.0
         self.epsilon_min = 0.05
-        self.epsilon_decay = 0.9975
+        self.epsilon_decay = 0.9985
         self.learn_steps = 0
         self.tau = 0.005
 
