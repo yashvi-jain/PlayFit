@@ -12,16 +12,36 @@ def moving_average(values, window=50):
         return values
     return np.convolve(values, np.ones(window) / window, mode="valid")
 
+def hint_rate(counts):
+    tot = max(counts.sum(), 1)
+    return sum(c for a, c in enumerate(counts) if PlayFitEnv.decode_action(a)[2]) / tot
+
+def recovery_rate(counts):
+    tot = max(counts.sum(), 1)
+    return sum(c for a, c in enumerate(counts) if PlayFitEnv.decode_action(a)[3]) / tot
+
+def validate(agent, n=30):
+    """Greedy (no exploration) mean reward on held-out player scenarios (seeds never used for training or evaluation)."""
+    total = 0.0
+    for k in range(n):
+        env = PlayFitEnv(seed=50000 + k)
+        state, done = env.reset(), False
+        while not done:
+            state, reward, done, _ = env.step(agent.act(state, explore=False))
+            total += reward
+    return total / n
+
 def main():
     seed = int(sys.argv[1]) if len(sys.argv) > 1 else 42
     tag = "" if seed == 42 else f"_seed{seed}"
     os.makedirs("artifacts", exist_ok=True)
 
     agent = DQNAgent(seed=seed)
-    episodes = 2000 
+    episodes = 3000
+    best_val, best_state = -np.inf, None
 
     rewards, lengths, dropouts, frustrations, engagements = [], [], [], [], []
-    action_counts = np.zeros(5, dtype=int)
+    action_counts = np.zeros(PlayFitEnv.N_ACTIONS, dtype=int)
 
     for episode in range(episodes):
         # Fresh env each episode, reproducible via deterministic seed
@@ -48,16 +68,24 @@ def main():
         engagements.append(float(last_info.get("engagement", 0.0)))
         agent.decay_epsilon()
 
+        if (episode + 1) % 100 == 0 and agent.epsilon <= 0.3:
+            val = validate(agent)
+            if val > best_val:   # keep the best greedy policy; a 36-action DQN can oscillate late in training
+                best_val = val
+                best_state = {k: v.clone() for k, v in agent.online.state_dict().items()}
+
         if (episode + 1) % 200 == 0:
             recent = np.mean(rewards[-200:])
             print(
                 f"Episode {episode + 1}/{episodes} | "
                 f"mean reward (last 200): {recent:.2f} | "
-                f"epsilon: {agent.epsilon:.4f} | "
-                f"action dist: {action_counts / max(action_counts.sum(), 1)}"
+                f"epsilon: {agent.epsilon:.4f} | best val: {best_val:.2f} | "
+                f"hint rate: {hint_rate(action_counts):.2f} | recovery rate: {recovery_rate(action_counts):.2f}"
             )
-            action_counts = np.zeros(5, dtype=int)
+            action_counts = np.zeros(PlayFitEnv.N_ACTIONS, dtype=int)
 
+    if best_state is not None:
+        agent.online.load_state_dict(best_state)
     agent.save(f"artifacts/playfit_dqn{tag}.pt")
     with open(f"artifacts/training_log{tag}.csv", "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)

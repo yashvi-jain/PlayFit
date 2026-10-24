@@ -7,37 +7,43 @@ from dqn_agent import DQNAgent
 
 N_EPISODES = 300
 SEEDS = [10000 + i for i in range(N_EPISODES)]   # never used in training (train seeds are 0..1999)
-DELTAS = [-0.15, -0.07, 0.0, 0.07, 0.15]
-FIXED = {"Fixed Easy": 0.25, "Fixed Medium": 0.50, "Fixed Hard": 0.75}
+ENEMY_NAMES = ["weaker", "same", "stronger"]
+TIME_NAMES = ["tighter", "same", "looser"]
+FIXED = {"Fixed Easy": 0.25, "Fixed Medium": 0.50, "Fixed Hard": 0.75}   # enemy strength; no hints/recovery, time limit 0.7
+enc = PlayFitEnv.encode_action
 POLICIES = ["DQN", "Rule-Based Adaptive", "Random", *FIXED]
 
 def rule_based(obs):
     """Strong non-RL baseline: a hand-tuned controller that only sees what the agent sees
     (success trend, frustration, noisy boredom signal). Eases when struggling, hardens when coasting."""
-    trend, frustration, boredom = obs[7], obs[5], obs[8]
+    trend, frustration, boredom = obs[10], obs[8], obs[11]
     if frustration > 0.30 or trend < 0.40:
-        return 0 if trend < 0.25 else 1
+        # struggling: weaker enemies, more time, and turn on hints + recovery when really stuck
+        stuck = trend < 0.25
+        return enc(0, 2, int(stuck), int(stuck))
     if boredom > 0.12 or trend > 0.85:
-        return 4 if boredom > 0.30 else 3
-    return 2
+        # coasting: stronger enemies, tighter time limit when clearly bored
+        return enc(2, 0 if boredom > 0.30 else 1, 0, 0)
+    return PlayFitEnv.NO_OP
 
 def run_episode(policy, seed, agent, rng):
     env = PlayFitEnv(seed=seed)
     state = env.reset()
     if policy in FIXED:
-        env.difficulty = FIXED[policy]
+        env.enemy_strength = FIXED[policy]
+        env.difficulty = env._effective_difficulty()
         state = env._observation()
     total_reward, diffs = 0.0, []
-    counts = np.zeros(5, dtype=int)
+    counts = np.zeros(PlayFitEnv.N_ACTIONS, dtype=int)
     while True:
         if policy == "DQN":
             action = agent.act(state, explore=False)
         elif policy == "Rule-Based Adaptive":
             action = rule_based(state)
         elif policy == "Random":
-            action = int(rng.integers(5))
+            action = int(rng.integers(PlayFitEnv.N_ACTIONS))
         else:
-            action = 2
+            action = PlayFitEnv.NO_OP
         diffs.append(env.difficulty)
         counts[action] += 1
         state, reward, done, info = env.step(action)
@@ -49,8 +55,8 @@ def run_episode(policy, seed, agent, rng):
                 "boredom": info["boredom"], "engagement": info["engagement"],
                 "skill_gain": info["skill"] - env.initial_skill, "mean_difficulty": float(np.mean(diffs)),
             }
-            for k in range(5):
-                row[f"action_{k}_count"] = int(counts[k])
+            for a in range(PlayFitEnv.N_ACTIONS):
+                row[f"action_{a}_count"] = int(counts[a])
             return row
 
 def ci95(x):
@@ -104,11 +110,16 @@ def main():
         print(line + f"  | DQN wins on {wins:.0%} of scenarios")
 
     print("\nDQN diagnostics")
-    print("Mean difficulty:", round(np.mean([x["mean_difficulty"] for x in by["DQN"]]), 3))
-    tot = sum(sum(x[f"action_{k}_count"] for x in by["DQN"]) for k in range(5))
-    for k in range(5):
-        c = sum(x[f"action_{k}_count"] for x in by["DQN"])
-        print(f"  Action {k} (delta={DELTAS[k]:+.2f}): {c / tot:.1%}")
+    print("Mean effective difficulty:", round(np.mean([x["mean_difficulty"] for x in by["DQN"]]), 3))
+    acts = np.array([sum(x[f"action_{a}_count"] for x in by["DQN"]) for a in range(PlayFitEnv.N_ACTIONS)], dtype=float)
+    acts /= acts.sum()
+    dec = [PlayFitEnv.decode_action(a) for a in range(PlayFitEnv.N_ACTIONS)]
+    for i, name in enumerate(ENEMY_NAMES):
+        print(f"  Enemy strength {name:<9}: {sum(p for p, d in zip(acts, dec) if d[0] == i):.1%}")
+    for i, name in enumerate(TIME_NAMES):
+        print(f"  Time limit {name:<9}: {sum(p for p, d in zip(acts, dec) if d[1] == i):.1%}")
+    print(f"  Hints on     : {sum(p for p, d in zip(acts, dec) if d[2]):.1%}")
+    print(f"  Recovery on  : {sum(p for p, d in zip(acts, dec) if d[3]):.1%}")
 
     titles = {"reward": "Mean Episode Reward", "length": "Mean Session Length (steps)",
               "skill_gain": "Mean Skill Gain", "boredom": "Final Boredom", "frustration": "Final Frustration",
